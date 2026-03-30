@@ -94,6 +94,10 @@ cmd_send() {
   tmux send-keys -t "$session" Enter
   sleep 0.5
   tmux send-keys -t "$session" Enter
+
+  # Mandatory delay: give Codex time to start processing before poll begins.
+  # Without this, poll sees the › placeholder and returns "ready" immediately.
+  sleep 5
 }
 
 cmd_poll() {
@@ -101,9 +105,23 @@ cmd_poll() {
   local pane_content
   pane_content=$(tmux capture-pane -t "$session" -p 2>/dev/null || true)
 
-  # Check for the › prompt marker anywhere in the pane (idle state)
-  # The Codex TUI renders › at the input line, with status info below it
-  if echo "$pane_content" | grep -q "›"; then
+  # IMPORTANT: The › character appears in Codex's TUI in BOTH idle and working states
+  # (it's the suggestion placeholder line). We must check for WORKING indicators instead.
+  #
+  # Working indicators:
+  #   "Working ("          — e.g. "Working (13s • esc to interrupt)"
+  #   "esc to interrupt"   — appears during active processing
+  #   "Exploring"          — appears when Codex is exploring files
+  #   "Explored"           — appears right after exploration
+  #   "• Ran "             — appears when Codex ran a command
+  #
+  # The session is "ready" only when:
+  #   1. The › prompt IS present (Codex is loaded), AND
+  #   2. No working indicators are present
+
+  if echo "$pane_content" | grep -qE "(Working \(|esc to interrupt|Exploring|• Ran )"; then
+    echo "working"
+  elif echo "$pane_content" | grep -q "›"; then
     echo "ready"
   else
     echo "working"
