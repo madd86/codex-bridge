@@ -1,10 +1,16 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "codex-bridge",
   "description": "Codex Bridge plugin marketplace",
-  "plugins": {
-    "codex-bridge": {
-      "path": ".",
-      "description": "Delegate tasks to OpenAI Codex CLI via tmux sessions with supervised polling and automatic code review"
+  "owner": {
+    "name": "Gabe"
+  },
+  "plugins": [
+    {
+      "name": "codex-bridge",
+      "description": "Delegate tasks to OpenAI Codex CLI via tmux sessions with supervised polling and automatic code review",
+      "source": ".",
+      "category": "development"
     }
-  }
+  ]
 }
