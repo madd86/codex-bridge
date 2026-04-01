@@ -1,7 +1,7 @@
 ---
 name: codex
 description: Delegate tasks to OpenAI Codex CLI via tmux. Use when the user asks to use Codex, says "have Codex do this", "ask Codex to", or invokes /codex. Claude acts as an expert prompter, monitors the session, and auto-reviews code output.
-version: 0.3.0
+version: 0.4.0
 ---
 
 # Codex Bridge
@@ -107,27 +107,21 @@ bash "$SCRIPT" send "$SESSION" "<your constructed prompt>"
 
 The send command includes a built-in 5-second delay after submission. Do NOT poll immediately after calling send — the delay is handled internally.
 
-### Step 5: Supervised Poll Loop
+### Step 5: Wait for Completion
 
-Poll every 5 seconds until Codex finishes. Timeout after 5 minutes.
+Use the `wait` command — it handles all polling robustly. It requires **two consecutive stable "ready" polls** to prevent false positives during brief gaps between Codex work phases.
 
 ```bash
-WAITED=0
-while [ "$WAITED" -lt 300 ]; do
-  STATUS=$(bash "$SCRIPT" poll "$SESSION")
-  if [ "$STATUS" = "ready" ]; then
-    break
-  fi
-  sleep 5
-  WAITED=$((WAITED + 5))
-done
+RESULT=$(bash "$SCRIPT" wait "$SESSION" 300)
 ```
 
-**IMPORTANT polling notes:**
-- The poll command checks for working indicators (like "Working", "esc to interrupt"). It returns `ready` only when Codex is truly idle.
-- If poll returns `ready` after just a few seconds, **verify by capturing output** — if the capture doesn't show a Codex response to your prompt, the prompt may not have been submitted. Re-send it.
-- If timeout (5 min) is reached: tell the user, ask whether to abort or keep waiting.
+- Returns `ready` when Codex is truly done (two consecutive stable polls).
+- Returns `timeout` after 300 seconds (5 minutes). You can pass a different timeout as the third argument.
+- If timeout: tell the user, ask whether to abort or keep waiting.
 - To abort: `bash "$SCRIPT" abort "$SESSION"`
+- To keep waiting: run `wait` again with a new timeout.
+
+**This is a blocking call.** It will take at least 10 seconds to return "ready" (two polls at 5s intervals). This is by design — it prevents false positives.
 
 ### Step 6: Capture Output
 
@@ -173,17 +167,19 @@ On first run, check if `.codex-logs/` is in the project's `.gitignore`. If not, 
 | Situation | Action |
 |---|---|
 | `start` fails | Tell user the error, STOP. Do NOT do the work yourself. |
-| Poll returns `ready` suspiciously fast (<10s) | Capture and verify — re-send if no response visible |
-| Codex never finishes (5min timeout) | Ask user: abort or wait? |
-| Codex errors (Traceback, Error:) | Report error snippet, save log, teardown |
+| `wait` returns `timeout` | Ask user: abort or keep waiting? |
+| Codex errors (Traceback, Error:) in captured output | Report error snippet, save log, teardown |
+| Captured output shows no response to your prompt | The prompt may not have submitted. Send another Enter and wait again. |
 | Output looks wrong or incomplete | Warn user, provide log path for manual inspection |
+
+**NEVER bail and do the work yourself.** If Codex fails, report the failure to the user and let them decide next steps.
 
 ## Troubleshooting
 
 **Script not found at `${CLAUDE_PLUGIN_ROOT}`** — Use the find command: `find ~/.claude/plugins/cache -name "codex-bridge.sh" -path "*/scripts/*" 2>/dev/null | head -1`
 
-**`start` fails with "codex not installed"** — Codex runs inside a tmux session that inherits the user's login shell. If the user can run `codex` in their terminal, it should work in tmux. Ask the user to verify `codex --version` works in their terminal.
+**`start` fails** — Codex runs inside tmux which inherits the user's login shell. Ask the user to verify `codex --version` works in their terminal.
 
-**Poll returns ready immediately** — The send command has a built-in 5s delay, but if Codex hasn't started processing yet, poll may see the idle prompt. Capture and verify. If no response is visible, wait 10 more seconds and poll again.
+**`wait` returns `timeout`** — Codex may still be working on a long task. Ask the user if they want to abort or extend the timeout. Do NOT tear down the session without asking.
 
-**Prompt wasn't submitted** — The send command uses double-Enter. If the capture shows your prompt text sitting in the input line without a Codex response below it, send another Enter: `bash "$SCRIPT" send-keys "$SESSION" Enter`
+**Prompt wasn't submitted** — If captured output shows your prompt text in the input line without a Codex response below it, submit it: `tmux send-keys -t "$SESSION" Enter`

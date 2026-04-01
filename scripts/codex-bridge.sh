@@ -91,32 +91,71 @@ cmd_send() {
   sleep 5
 }
 
+_get_pane_hash() {
+  # Returns a hash of the visible pane content for stability comparison
+  tmux capture-pane -t "$1" -p 2>/dev/null | md5 -q 2>/dev/null || tmux capture-pane -t "$1" -p 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1
+}
+
+_has_working_indicators() {
+  # Check for ANY sign of active work in the pane content.
+  # These indicators appear during different Codex work phases.
+  local pane_content="$1"
+  echo "$pane_content" | grep -qE "(Working \(|esc to interrupt|Exploring|Explored|• Ran |• Read |Wrote |Patched |Created )"
+}
+
 cmd_poll() {
   local session="$1"
   local pane_content
   pane_content=$(tmux capture-pane -t "$session" -p 2>/dev/null || true)
 
-  # IMPORTANT: The › character appears in Codex's TUI in BOTH idle and working states
-  # (it's the suggestion placeholder line). We must check for WORKING indicators instead.
-  #
-  # Working indicators:
-  #   "Working ("          — e.g. "Working (13s • esc to interrupt)"
-  #   "esc to interrupt"   — appears during active processing
-  #   "Exploring"          — appears when Codex is exploring files
-  #   "Explored"           — appears right after exploration
-  #   "• Ran "             — appears when Codex ran a command
-  #
-  # The session is "ready" only when:
-  #   1. The › prompt IS present (Codex is loaded), AND
-  #   2. No working indicators are present
-
-  if echo "$pane_content" | grep -qE "(Working \(|esc to interrupt|Exploring|• Ran )"; then
+  if _has_working_indicators "$pane_content"; then
     echo "working"
   elif echo "$pane_content" | grep -q "›"; then
     echo "ready"
   else
     echo "working"
   fi
+}
+
+cmd_wait() {
+  # Robust wait: polls until Codex is TRULY done.
+  # Requires TWO consecutive "ready" polls with STABLE content between them.
+  # This prevents false positives during brief gaps between Codex work phases.
+  local session="$1"
+  local timeout="${2:-300}"  # default 5 minutes
+  local waited=0
+  local ready_count=0
+  local prev_hash=""
+
+  while [ "$waited" -lt "$timeout" ]; do
+    local status
+    status=$(cmd_poll "$session")
+
+    if [ "$status" = "ready" ]; then
+      # Check content stability: is the pane the same as last poll?
+      local curr_hash
+      curr_hash=$(_get_pane_hash "$session")
+
+      if [ "$ready_count" -gt 0 ] && [ "$curr_hash" = "$prev_hash" ]; then
+        # Two consecutive "ready" polls with identical content = truly done
+        echo "ready"
+        return 0
+      fi
+
+      ready_count=$((ready_count + 1))
+      prev_hash="$curr_hash"
+    else
+      # Reset if we see working indicators
+      ready_count=0
+      prev_hash=""
+    fi
+
+    sleep 5
+    waited=$((waited + 5))
+  done
+
+  echo "timeout"
+  return 1
 }
 
 cmd_capture() {
@@ -140,9 +179,10 @@ case "${1:-}" in
   start)    cmd_start ;;
   send)     cmd_send "${2:?Usage: codex-bridge.sh send <session> <prompt>}" "${3:?}" ;;
   poll)     cmd_poll "${2:?Usage: codex-bridge.sh poll <session>}" ;;
+  wait)     cmd_wait "${2:?Usage: codex-bridge.sh wait <session> [timeout_seconds]}" "${3:-300}" ;;
   capture)  cmd_capture "${2:?Usage: codex-bridge.sh capture <session>}" ;;
   abort)    cmd_abort "${2:?Usage: codex-bridge.sh abort <session>}" ;;
   save-log) cmd_save_log "${2:?Usage: codex-bridge.sh save-log <session>}" ;;
   teardown) cmd_teardown "${2:?Usage: codex-bridge.sh teardown <session>}" ;;
-  *)        echo "Usage: codex-bridge.sh {start|send|poll|capture|abort|save-log|teardown} [args...]" >&2; exit 1 ;;
+  *)        echo "Usage: codex-bridge.sh {start|send|poll|wait|capture|abort|save-log|teardown} [args...]" >&2; exit 1 ;;
 esac
