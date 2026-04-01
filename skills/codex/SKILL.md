@@ -1,24 +1,35 @@
 ---
 name: codex
 description: Delegate tasks to OpenAI Codex CLI via tmux. Use when the user asks to use Codex, says "have Codex do this", "ask Codex to", or invokes /codex. Claude acts as an expert prompter, monitors the session, and auto-reviews code output.
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Codex Bridge
 
-Delegate tasks to OpenAI Codex CLI running in a tmux session. You are the expert prompter — you construct rich context, send it to Codex as a capable teammate, monitor the session, and review the results.
+Delegate tasks to OpenAI Codex CLI running in a **tmux session**. Codex ALWAYS runs inside tmux — never directly. You are the expert prompter — you construct rich context, send it to Codex as a capable teammate, monitor the tmux session, and review the results.
 
 ## CRITICAL RULES
 
 <EXTREMELY_IMPORTANT>
-You MUST follow the tmux-based workflow below. You MUST NOT:
+
+**Codex runs inside tmux. Always. No exceptions.**
+
+You MUST:
+- Use the shell helper script for ALL Codex interactions (start, send, poll, capture, teardown)
+- Follow every step of the workflow below, in order, completely
+- Let the shell helper handle codex binary resolution — it launches codex inside tmux where the user's shell PATH is available
+
+You MUST NOT:
 - Do the work yourself instead of delegating to Codex
-- Skip the tmux session and try to run codex directly
-- Bail out because "codex isn't installed" without trying the shell helper first (it handles npx fallback)
+- Try to run codex directly (not via tmux)
+- Check if codex is on PATH yourself — the tmux session inherits the user's login shell where codex is installed
+- Search for codex binaries, run `which codex`, `command -v codex`, `npm list`, or any other binary detection
+- Bail out and do the work yourself if something goes wrong — report the error to the user instead
 - Abandon the workflow partway through
 - Return Codex's raw output without reviewing it
 
-If the shell helper's `start` command fails, THAT is when you tell the user what's missing. Not before. Do not check for codex on PATH yourself — the shell helper does that.
+**If you are about to do the work yourself instead of delegating to Codex: STOP. That defeats the entire purpose of this skill.**
+
 </EXTREMELY_IMPORTANT>
 
 ## When This Skill Activates
@@ -27,21 +38,31 @@ If the shell helper's `start` command fails, THAT is when you tell the user what
 - User invokes `/codex <task>`
 - NEVER auto-trigger — you do not autonomously spend OpenAI tokens
 
-## Prerequisites
+## Finding the Shell Helper
 
-The shell helper script is at `${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh`. All tmux mechanics go through this script. Do NOT run tmux commands directly — always use the script.
+The shell helper script is at `${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh`.
+
+If `${CLAUDE_PLUGIN_ROOT}` is not set, find the script:
+```bash
+find ~/.claude/plugins/cache -name "codex-bridge.sh" -path "*/scripts/*" 2>/dev/null | head -1
+```
+
+Store the result and use it for all subsequent commands. Do NOT run tmux commands directly — always go through the script.
 
 ## Workflow
 
 Follow these steps IN ORDER. Do not skip steps. Do not combine steps.
 
-### Step 1: Pre-Flight
+### Step 1: Pre-Flight — Start the tmux session
 
 ```bash
-SESSION=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" start)
+SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh"
+SESSION=$(bash "$SCRIPT" start)
 ```
 
-If this fails, relay the error to the user and STOP. If it succeeds, it returns a session name like `codex-session-7781`.
+This creates a tmux session, launches `codex --yolo` inside it, and handles startup prompts (trust, updates). It returns a session name like `codex-session-7781`.
+
+If this fails, relay the error to the user and STOP. Do NOT fall back to doing the work yourself.
 
 ### Step 2: Notify User
 
@@ -81,7 +102,7 @@ Before sending anything to Codex, build a structured prompt. Codex starts with Z
 ### Step 4: Send the Prompt
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" send "$SESSION" "<your constructed prompt>"
+bash "$SCRIPT" send "$SESSION" "<your constructed prompt>"
 ```
 
 The send command includes a built-in 5-second delay after submission. Do NOT poll immediately after calling send — the delay is handled internally.
@@ -93,7 +114,7 @@ Poll every 5 seconds until Codex finishes. Timeout after 5 minutes.
 ```bash
 WAITED=0
 while [ "$WAITED" -lt 300 ]; do
-  STATUS=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" poll "$SESSION")
+  STATUS=$(bash "$SCRIPT" poll "$SESSION")
   if [ "$STATUS" = "ready" ]; then
     break
   fi
@@ -106,12 +127,12 @@ done
 - The poll command checks for working indicators (like "Working", "esc to interrupt"). It returns `ready` only when Codex is truly idle.
 - If poll returns `ready` after just a few seconds, **verify by capturing output** — if the capture doesn't show a Codex response to your prompt, the prompt may not have been submitted. Re-send it.
 - If timeout (5 min) is reached: tell the user, ask whether to abort or keep waiting.
-- To abort: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" abort "$SESSION"`
+- To abort: `bash "$SCRIPT" abort "$SESSION"`
 
 ### Step 6: Capture Output
 
 ```bash
-OUTPUT=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" capture "$SESSION")
+OUTPUT=$(bash "$SCRIPT" capture "$SESSION")
 ```
 
 Read the output carefully. Understand what Codex did. Look for:
@@ -138,7 +159,7 @@ Read the output carefully. Understand what Codex did. Look for:
 ### Step 8: Cleanup
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.sh" teardown "$SESSION"
+bash "$SCRIPT" teardown "$SESSION"
 ```
 
 Tell the user: `Session log saved to .codex-logs/<SESSION>.log`
@@ -151,7 +172,7 @@ On first run, check if `.codex-logs/` is in the project's `.gitignore`. If not, 
 
 | Situation | Action |
 |---|---|
-| `start` fails (tmux/codex missing) | Tell user what to install, STOP |
+| `start` fails | Tell user the error, STOP. Do NOT do the work yourself. |
 | Poll returns `ready` suspiciously fast (<10s) | Capture and verify — re-send if no response visible |
 | Codex never finishes (5min timeout) | Ask user: abort or wait? |
 | Codex errors (Traceback, Error:) | Report error snippet, save log, teardown |
@@ -159,8 +180,10 @@ On first run, check if `.codex-logs/` is in the project's `.gitignore`. If not, 
 
 ## Troubleshooting
 
-**"Codex isn't installed"** — Do NOT check for codex yourself. Run the `start` command. It handles PATH resolution and npx fallback. Only if `start` fails should you report the error.
+**Script not found at `${CLAUDE_PLUGIN_ROOT}`** — Use the find command: `find ~/.claude/plugins/cache -name "codex-bridge.sh" -path "*/scripts/*" 2>/dev/null | head -1`
+
+**`start` fails with "codex not installed"** — Codex runs inside a tmux session that inherits the user's login shell. If the user can run `codex` in their terminal, it should work in tmux. Ask the user to verify `codex --version` works in their terminal.
 
 **Poll returns ready immediately** — The send command has a built-in 5s delay, but if Codex hasn't started processing yet, poll may see the idle prompt. Capture and verify. If no response is visible, wait 10 more seconds and poll again.
 
-**Prompt wasn't submitted** — The send command uses double-Enter. If the capture shows your prompt text sitting in the input line without a Codex response below it, send another Enter: `tmux send-keys -t "$SESSION" Enter`
+**Prompt wasn't submitted** — The send command uses double-Enter. If the capture shows your prompt text sitting in the input line without a Codex response below it, send another Enter: `bash "$SCRIPT" send-keys "$SESSION" Enter`

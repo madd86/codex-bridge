@@ -4,20 +4,9 @@ set -euo pipefail
 CODEX_LOG_DIR="${CODEX_LOG_DIR:-.codex-logs}"
 
 cmd_start() {
-  # Pre-flight checks
+  # Pre-flight: tmux is required
   if ! command -v tmux &>/dev/null; then
-    echo "ERROR: tmux is not installed" >&2
-    exit 1
-  fi
-
-  # Resolve codex binary: prefer PATH, fall back to npx
-  local codex_cmd
-  if command -v codex &>/dev/null; then
-    codex_cmd="codex"
-  elif command -v npx &>/dev/null && npx --no-install @openai/codex --version &>/dev/null 2>&1; then
-    codex_cmd="npx @openai/codex"
-  else
-    echo "ERROR: codex is not installed (npm install -g @openai/codex)" >&2
+    echo "ERROR: tmux is not installed. Install with: brew install tmux" >&2
     exit 1
   fi
 
@@ -30,11 +19,13 @@ cmd_start() {
     fi
   done
 
-  # Create tmux session with large viewport
+  # Create tmux session with large viewport.
+  # Codex MUST run inside tmux — never run it directly.
+  # The tmux session inherits the user's login shell environment where codex is on PATH.
   tmux new-session -d -s "$session" -x 200 -y 50
 
-  # Launch codex in yolo mode
-  tmux send-keys -t "$session" "$codex_cmd --yolo" Enter
+  # Launch codex in yolo mode inside the tmux session
+  tmux send-keys -t "$session" 'codex --yolo' Enter
 
   # Wait for trust prompt, update prompt, or input prompt (up to 30s)
   local waited=0
